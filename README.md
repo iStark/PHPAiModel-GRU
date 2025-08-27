@@ -11,9 +11,9 @@ Lightweight, educational **character-level GRU** you can **train in PHP** on `.t
 - **Pure PHP** GRU: forward/backward, SGD, gradient clipping.
 - **UTF-8 safe** tokenization (works with Russian + English).
 - **Trainer UI + SSE** progress stream with detailed log lines.
-- **Chat UI (light theme)** with model picker (newest preselected), Temp/Top-K controls.
+- **Chat UI** with model picker (newest preselected), Temp/Top-K controls.
 - **Portable model format** (`Models/*.json`) shared by trainer/inference.
-- PHP 7.4+ compatible (no `str_ends_with`).
+- PHP 7.4+ compatible.
 
 ---
 
@@ -51,8 +51,8 @@ mkdir -p Models Datasets
 Put one or more UTF-8 `.txt` files into `Datasets/`.  
 Format can be simple dialogue lines, e.g.:
 ```
-User: Hello!
-Assistant: Hi there!
+Hello!
+Hi there!
 
 Привет! Как дела?
 Отлично, спасибо!
