@@ -117,10 +117,10 @@ $models = list_models_by_mtime($MODELS_DIR);
             <?php endif; ?>
         </select>
         <div class="pill">
-            <span>Temp</span><input id="temp" type="number" step="0.05" min="0.1" max="2" value="0.9">
+            <span>Temp</span><input id="temp" type="number" step="0.05" min="0.1" max="2" value="0.4">
         </div>
         <div class="pill">
-            <span>Top-K</span><input id="topk" type="number" min="0" max="500" value="50">
+            <span>Top-K</span><input id="topk" type="number" min="0" max="500" value="20">
         </div>
         <div class="pill">
             <span>Max</span><input id="maxtok" type="number" min="1" max="2000" value="300">
@@ -194,8 +194,8 @@ $models = list_models_by_mtime($MODELS_DIR);
             const body = {
                 model,
                 prompt,
-                temperature: parseFloat(elTemp.value || '0.9'),
-                top_k: parseInt(elTopK.value || '50'),
+                temperature: parseFloat(elTemp.value || '0.4'),
+                top_k: parseInt(elTopK.value || '20'),
                 max_tokens: parseInt(elMaxTok.value || '300')
             };
             const res = await fetch('aicore.php', {

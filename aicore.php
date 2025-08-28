@@ -87,22 +87,72 @@ function softmax(array $v): array {
     return $out;
 }
 
-function sample_topk(array $probs, int $k=50, float $temp=1.0): int {
-    $N = count($probs); $k = max(1, min($k, $N));
-    // temp
-    if ($temp <= 0) $temp = 1e-6;
+function sample_topk(array $probs, int $top_k = 0, float $temperature = 0.4): int {
+    $V = count($probs);
+    if ($V === 0) return 0;
+
+    // safety: корректируем нули
+    $eps = 1e-12;
+    for ($i=0; $i<$V; $i++) {
+        if (!is_finite($probs[$i]) || $probs[$i] < 0) $probs[$i] = 0.0;
+    }
+    $sum = array_sum($probs);
+    if ($sum <= 0) {
+        // fallback: равномерно
+        return random_int(0, $V-1);
+    }
+    // нормализуем входные вероятности, на всякий случай
+    for ($i=0; $i<$V; $i++) $probs[$i] /= $sum;
+
+    // переводим в логиты и применяем температуру
     $logits = [];
-    foreach ($probs as $p) { $logits[] = log(max($p,1e-9)); }
-    $logits = array_map(fn($x)=>$x/$temp, $logits);
-    // pick top-k
-    $idxs = range(0,$N-1);
-    array_multisort($logits, SORT_DESC, $idxs);
-    $top = array_slice($idxs, 0, $k);
-    $exps = []; $sum=0.0;
-    foreach ($top as $i) { $e = exp($logits[$i]-$logits[$top[0]]); $exps[$i] = $e; $sum += $e; }
-    $r = mt_rand() / mt_getrandmax(); $acc=0.0;
-    foreach ($top as $i) { $acc += $exps[$i]/$sum; if ($r <= $acc) return $i; }
-    return $top[array_key_last($top)];
+    for ($i=0; $i<$V; $i++) {
+        $p = max($probs[$i], $eps);
+        $logits[$i] = log($p); // surrogate logits
+        if ($temperature > 0) {
+            $logits[$i] /= $temperature;
+        }
+    }
+
+    // top-k: оставляем k наибольших логитов
+    if ($top_k > 0 && $top_k < $V) {
+        // получим индексы топ-K
+        $idx = range(0, $V-1);
+        usort($idx, function($a,$b) use ($logits){ return $logits[$b] <=> $logits[$a]; });
+        $keep = array_slice($idx, 0, $top_k);
+        $keepSet = array_fill_keys($keep, true);
+        // маскируем остальные минус бесконечностью (большой -INF)
+        $NEG_INF = -1e30;
+        for ($i=0; $i<$V; $i++) {
+            if (!isset($keepSet[$i])) $logits[$i] = $NEG_INF;
+        }
+    }
+
+    // стабилизация softmax
+    $maxLogit = max($logits);
+    $exps = [];
+    $sumExp = 0.0;
+    for ($i=0; $i<$V; $i++) {
+        // если был -INF, exp станет 0
+        $e = exp($logits[$i] - $maxLogit);
+        $exps[$i] = $e;
+        $sumExp += $e;
+    }
+    if ($sumExp <= 0) {
+        // на всякий: выбираем argmax логитов
+        $best = 0; $bestVal = -INF;
+        for ($i=0; $i<$V; $i++) if ($logits[$i] > $bestVal) { $bestVal = $logits[$i]; $best = $i; }
+        return $best;
+    }
+
+    // превращаем в распределение и семплим по CDF
+    $r = mt_rand() / mt_getrandmax();
+    $acc = 0.0;
+    for ($i=0; $i<$V; $i++) {
+        $acc += $exps[$i] / $sumExp;
+        if ($r <= $acc) return $i;
+    }
+    return $V-1; // из-за численной погрешности
 }
 
 // --- state ---
@@ -117,8 +167,8 @@ $history = (string)($_SESSION['history'] ?? '');
 $prompt = trim((string)($body['prompt'] ?? ''));
 if ($prompt === '') { echo json_encode(['ok'=>false,'error'=>'empty prompt']); exit; }
 
-$temperature = max(0.1, (float)($body['temperature'] ?? 0.9));
-$top_k = max(1, (int)($body['top_k'] ?? 50));
+$temperature = max(0.1, (float)($body['temperature'] ?? 0.4));
+$top_k = max(1, (int)($body['top_k'] ?? 20));
 $max_tokens = max(1, min(2000, (int)($body['max_tokens'] ?? 300)));
 
 // Compose input text (very simple chat formatting)
@@ -189,17 +239,57 @@ foreach ($ids as $id) { [$h,$p] = gru_step($W, $h, $id, $H, $V); }
 // generate
 $out_ids = [];
 $cur = $last_id; // seed with last char
-for($t=0;$t<$max_tokens;$t++){
-    [$h,$p] = gru_step($W, $h, $cur, $H, $V);
-    $cur = sample_topk($p, $top_k, $temperature);
+for ($t = 0; $t < $max_tokens; $t++) {
+    // gru_step должен вернуть [h, probs] где probs — массив длины V с вероятностями
+    [$h, $probs] = gru_step($W, $h, $cur, $H, $V);
+
+    // sanity-check: массив? есть NaN/Inf?
+    $valid = is_array($probs) && count($probs) === $V;
+    $nanCount = 0;
+    if ($valid) {
+        foreach ($probs as $q) {
+            if (!is_finite($q) || $q < 0) { $nanCount++; }
+        }
+    }
+
+    // топ-5 для удобства
+    $topK = 5;
+    $pairs = [];
+    if ($valid) {
+        foreach ($probs as $idx => $pv) { $pairs[] = [$idx, $pv]; }
+        usort($pairs, function($a,$b){ return $b[1] <=> $a[1]; });
+        $topView = array_slice($pairs, 0, $topK);
+    } else {
+        $topView = [];
+    }
+
+    // лог
+    file_put_contents('debug.log',
+        sprintf(
+            "Step %d: valid=%s, nan=%d, V=%d, cur=%d ('%s'), top=%s\n",
+            $t,
+            $valid ? 'yes' : 'no',
+            $nanCount,
+            $V,
+            $cur,
+            $ivocab[$cur] ?? '',
+            json_encode(array_map(function($p) use ($ivocab) {
+                [$i,$pv] = $p;
+                return ['i'=>$i, 'p'=>$pv, 'ch'=>$ivocab[$i] ?? ''];
+            }, $topView), JSON_UNESCAPED_UNICODE)
+        ),
+        FILE_APPEND
+    );
+
+    // выбор следующего токена
+    $cur = sample_topk($probs, $top_k, $temperature);
     $out_ids[] = $cur;
-    // simple stop on newline
-    if ($cfg['meta']['stop_on_newline'] ?? true) {
-        $ch = $ivocab[$cur] ?? '';
-        if ($ch === "\n") break;
+
+    // стоп по переводу строки (если включено в метаданных модели)
+    if (($cfg['meta']['stop_on_newline'] ?? true) && (($ivocab[$cur] ?? '') === "\n")) {
+        break;
     }
 }
-
 $reply = from_ids($out_ids, $ivocab);
 $_SESSION['history'] = $history . "User: " . $prompt . "\nAssistant: " . $reply . "\n"; // keep convo
 
